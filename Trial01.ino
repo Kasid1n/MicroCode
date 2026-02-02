@@ -7,14 +7,13 @@
 
 // --- ตั้งค่า Stepper (28BYJ-48 พร้อม ULN2003) ---
 const int stepsPerRevolution = 2048; 
-AccelStepper stepper(AccelStepper::FULL4WIRE, 13, 14, 12, 27); //IN1 IN3 IN2 IN4
+AccelStepper stepper(AccelStepper::FULL4WIRE, 23, 19, 22, 18); 
 
 // --- การตั้งค่า WiFi และ MQTT ---
 const char ssid[] = "@JumboPlusIoT";
 const char pass[] = "07450748";
 const char mqtt_broker[] = "test.mosquitto.org";
-const char mqtt_client_id[] = "AI_Group4_Control_V3";
-int MQTT_PORT = 1883;
+const char mqtt_client_id[] = "AI_Group4_Emergency_System";
 
 // Topics
 const char topic_ldr[] = "groupAi4/ldr";
@@ -26,51 +25,44 @@ WiFiClient net;
 MQTTClient client;
 
 // --- ตัวแปรสถานะ ---
-bool isLocked = false; 
+bool isEmergency = false; // เปลี่ยนชื่อจาก isLocked เป็น isEmergency เพื่อความชัดเจน
 int ldrValue = 0;
 unsigned long lastReportTime = 0;
 
 void connect() {
   Serial.print("Connecting WiFi...");
   while (WiFi.status() != WL_CONNECTED) { delay(500); }
-  
-  Serial.print("\nConnecting MQTT...");
   while (!client.connect(mqtt_client_id)) { delay(500); }
-  
-  Serial.println("\nConnected!");
   client.subscribe(topic_command);
   publishStatus();
 }
 
 void messageReceived(String &topic, String &payload) {
-  Serial.println("Command: " + payload);
-  
-  if (payload == "lock") {
-    isLocked == !isLocked;
+  if (payload == "lock" || payload == "emergency") {
+    isEmergency = !isEmergency;
+    stepper.stop(); // หยุดมอเตอร์ทันทีด้วยความเร่งสูงสุด
   }
-
   else if (payload == "reset_zero") {
-    isLocked = false;
-    stepper.moveTo(0);
+    stepper.setCurrentPosition(0);
+    Serial.println("Position Reset to 0");
   }
   publishStatus();
 }
 
 void publishStatus() {
-  String statusMsg = isLocked ? "Locked (Manual)" : (stepper.distanceToGo() != 0 ? "Moving" : "Static");
+  String statusMsg = isEmergency ? "Locking" : (stepper.distanceToGo() != 0 ? "Moving" : "Ready");
   client.publish(topic_motor_status, statusMsg);
 }
 
 void setup() {
   Serial.begin(115200);
-  stepper.setMaxSpeed(800);
-  stepper.setAcceleration(400);
+  stepper.setMaxSpeed(1000);
+  stepper.setAcceleration(800);
   stepper.setCurrentPosition(0);
 
   WiFi.begin(ssid, pass);
-  client.begin(mqtt_broker, MQTT_PORT, net);
+  client.begin(mqtt_broker, 1883, net);
   client.onMessage(messageReceived);
-
   connect();
 }
 
@@ -81,27 +73,37 @@ void loop() {
   // 1. อ่านค่าและรายงานผลทุก 1 วินาที
   if (millis() - lastReportTime > 1000) {
     ldrValue = analogRead(LDR_PIN);
-    float currentDeg = (float)stepper.currentPosition() / stepsPerRevolution * 360.0;
+    
+    // คำนวณองศาปัจจุบัน (0-359.99)
+    float currentDeg = fmod((float)stepper.currentPosition() / stepsPerRevolution * 360.0, 360.0);
+    if (currentDeg < 0) currentDeg += 360.0; // จัดการกรณีหมุนทวนเข็มแล้วค่าติดลบ
     
     client.publish(topic_ldr, String(ldrValue));
     client.publish(topic_degree, String(currentDeg, 2));
-    
-    Serial.print("Deg: "); Serial.print(currentDeg);
-    Serial.print(" | LDR: "); Serial.println(ldrValue);
-    
     lastReportTime = millis();
     publishStatus();
   }
 
-  // 2. ตรรกะควบคุมตามแสง (ทำงานเมื่อไม่ได้สั่ง Lock)
-  if (!isLocked) {
+  // 2. ตรรกะควบคุมมอเตอร์
+  if (!isEmergency) {
     if (ldrValue >= 1200 && ldrValue <= 1800) {
-      stepper.moveTo(stepsPerRevolution); // ไปที่ 360 องศา
+      // สั่งให้หมุนไปข้างหน้าเรื่อยๆ แบบ Non-stop
+      stepper.setSpeed(600); 
+      stepper.runSpeed();
     } else {
-      stepper.moveTo(0); // กลับมาที่ 0 องศา
+      // ถ้าไม่อยู่ในช่วงแสง ให้หยุดนิ่ง ณ ตำแหน่งนั้น
+      stepper.stop();
+      stepper.run();
     }
   }
 
-  // 3. รันมอเตอร์
-  stepper.run();
+  // 3. จัดการเรื่องรอบ (เมื่อครบรอบ 360 ให้รีเซ็ตค่า Step เป็น 0 เพื่อเริ่มนับองศาใหม่)
+  if (abs(stepper.currentPosition()) >= stepsPerRevolution) {
+    stepper.setCurrentPosition(0);
+  }
+
+  // รันมอเตอร์ในกรณีที่ใช้คำสั่งระยะทาง (เช่น stop หรือ moveTo)
+  if (!isEmergency) {
+    stepper.run();
+  }
 }
