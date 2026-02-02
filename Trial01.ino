@@ -7,7 +7,7 @@
 
 // --- ตั้งค่า Stepper (28BYJ-48 พร้อม ULN2003) ---
 const int stepsPerRevolution = 2048; 
-AccelStepper stepper(AccelStepper::FULL4WIRE, 13, 14, 12, 27); 
+AccelStepper stepper(AccelStepper::FULL4WIRE, 13, 14, 12, 27); //IN1 IN3 IN2 IN4
 
 // --- การตั้งค่า WiFi และ MQTT ---
 const char ssid[] = "@JumboPlusIoT";
