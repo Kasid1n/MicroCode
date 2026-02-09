@@ -1,0 +1,43 @@
+const int ledPin = 22;      // GPIO16 ต่อกับ LED
+const int buttonPin = 21;   // GPIO14 ต่อกับปุ่มกด (แบบ Pull-up)
+const int freq = 1000;      
+const int resolution = 8;   
+
+// กำหนดระดับ Duty Cycle 5 ระดับ (0-255)
+// ระดับ: 0% , 25% , 50% , 75% , 100%
+const int brightnessLevels[] = {0, 64, 128, 192, 255};
+volatile int currentLevel = 0; // เก็บดัชนีว่าตอนนี้อยู่ระดับไหน (0-4)
+
+volatile unsigned long lastDebounceTime = 0;
+
+// ฟังก์ชัน ISR เมื่อมีการกดปุ่ม
+void IRAM_ATTR nextLevel() {
+  unsigned long now = millis();
+  // ป้องกันการกระเพื่อมของปุ่ม (Debounce)
+  if (now - lastDebounceTime > 200) {
+    currentLevel++;
+    if (currentLevel > 4) {
+      currentLevel = 0; // ถ้าเกินระดับ 5 ให้กลับไปมืดสนิท
+    }
+    lastDebounceTime = now;
+  }
+}
+
+void setup() {
+  pinMode(buttonPin, INPUT_PULLUP);
+  
+  // ตั้งค่า LEDC (PWM) สำหรับ ESP32 Core 3.0+
+  ledcAttach(ledPin, freq, resolution);
+  
+  // ตั้งค่า Interrupt ที่ขาปุ่มกด
+  attachInterrupt(digitalPinToInterrupt(buttonPin), nextLevel, FALLING);
+}
+
+void loop() {
+  // สั่งงานความสว่างตามระดับที่เลือกในปัจจุบัน
+  ledcWrite(ledPin, brightnessLevels[currentLevel]);
+  
+  // loop จะว่างเปล่าหรือทำงานอย่างอื่นก็ได้ 
+  // เพราะค่า currentLevel จะถูกเปลี่ยนทันทีโดย Interrupt
+  delay(10); 
+}
