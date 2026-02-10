@@ -10,23 +10,23 @@
 const int MOTOR_ENABLE = 23; 
 const int MOTOR_INPUT1 = 16; 
 const int MOTOR_INPUT2 = 17; 
-const int LED_CW = 4;       
-const int LED_CCW = 5;      
+const int LED_CW = 16;       
+const int LED_CCW = 17;      
 
 // --- WiFi & MQTT ---
 const char ssid[] = "@JumboPlusIoT";
 const char pass[] = "07450748";
 const char mqtt_broker[] = "test.mosquitto.org";
-const char mqtt_client_id[] = "AI_Group4_Control_New"; // เปลี่ยน ID เผื่อซ้ำ
+const char mqtt_client_id[] = "AI_Group4_Interrupt_Control";
 int MQTT_PORT = 1883;
 
 WiFiClient net;
 MQTTClient client;
-LCD_I2C lcd(0x27, 16, 2); // ถ้ายังค้าง ลองเปลี่ยนเป็น 0x3F
+LCD_I2C lcd(0x27, 16, 2); 
 RTC_DS1307 rtc;
 
 // --- State Variables ---
-bool isAutoMode = true;
+volatile bool isAutoMode = true; // ใช้ volatile สำหรับตัวแปรที่ใช้ใน Interrupt
 bool motorState = false;    
 bool ledcw = false;
 bool ledccw = false;
@@ -34,15 +34,19 @@ int ldrValue = 0;
 
 unsigned long lastPublishTime = 0;
 unsigned long lastLCDUpdateTime = 0;
+volatile unsigned long lastInterruptTime = 0; // สำหรับ Debounce ใน Interrupt
 
-// --- Functions ---
-void publishStatus() {
-  if (client.connected()) {
-    client.publish("groupAi4/modeStatus", isAutoMode ? "Auto" : "Manual");
-    client.publish("groupAi4/motorStatus", motorState ? "Working" : "Stop");
+// --- Interrupt Service Routine (ISR) ---
+void IRAM_ATTR handleButtonPress() {
+  unsigned long interruptTime = millis();
+  // Debounce 250ms: ถ้ากดย้ำๆ ในช่วงเวลานี้จะไม่ทำงาน
+  if (interruptTime - lastInterruptTime > 250) {
+    isAutoMode = !isAutoMode;
+    lastInterruptTime = interruptTime;
   }
 }
 
+// --- ฟังก์ชันควบคุมมอเตอร์ ---
 void stopMotor() {
   digitalWrite(MOTOR_INPUT1, LOW);
   digitalWrite(MOTOR_INPUT2, LOW);
@@ -67,24 +71,22 @@ void rotateCCW() {
   ledcw = false; ledccw = true; motorState = true;
 }
 
+void publishStatus() {
+  if (client.connected()) {
+    client.publish("groupAi4/modeStatus", isAutoMode ? "Auto" : "Manual");
+    client.publish("groupAi4/motorStatus", motorState ? "Working" : "Stop");
+  }
+}
+
 void connect() {
-  // เชื่อมต่อ WiFi แบบจำกัดเวลา (ไม่ค้างตลอดไป)
   int attempts = 0;
-  Serial.print("Connecting WiFi");
-  while (WiFi.status() != WL_CONNECTED && attempts < 20) {
+  while (WiFi.status() != WL_CONNECTED && attempts < 15) {
     delay(500);
-    Serial.print(".");
     attempts++;
   }
-  
-  if (WiFi.status() == WL_CONNECTED) {
-    Serial.println("\nWiFi Connected!");
-    if (client.connect(mqtt_client_id)) {
-      client.subscribe("groupAi4/command");
-      publishStatus();
-    }
-  } else {
-    Serial.println("\nWiFi Failed (Skip)");
+  if (WiFi.status() == WL_CONNECTED && client.connect(mqtt_client_id)) {
+    client.subscribe("groupAi4/command");
+    publishStatus();
   }
 }
 
@@ -99,20 +101,18 @@ void messageReceived(String &topic, String &payload) {
 void setup() {
   Serial.begin(115200);
   
-  // 1. เริ่มต้น LCD ก่อนเพื่อน
   Wire.begin(); 
   lcd.begin();
   lcd.backlight();
-  lcd.clear();
-  lcd.print("Initializing...");
+  lcd.print("System Ready...");
 
-  // 2. เริ่มต้น RTC (ถ้าไม่เจอก็แค่แจ้ง Serial ไม่ให้ค้าง)
-  if (!rtc.begin()) {
-    Serial.println("RTC Not Found");
-  }
+  if (!rtc.begin()) Serial.println("RTC Not Found");
 
-  // 3. Setup Pins
+  // --- Setup Interrupt ---
   pinMode(BUTTON_PIN, INPUT_PULLUP);
+  // สั่งให้เรียก handleButtonPress เมื่อแรงดันขา 19 เปลี่ยนจาก High เป็น Low (FALLING)
+  attachInterrupt(digitalPinToInterrupt(BUTTON_PIN), handleButtonPress, FALLING);
+
   pinMode(MOTOR_ENABLE, OUTPUT);
   pinMode(MOTOR_INPUT1, OUTPUT);
   pinMode(MOTOR_INPUT2, OUTPUT);
@@ -121,7 +121,6 @@ void setup() {
   digitalWrite(MOTOR_ENABLE, HIGH);
   stopMotor();
 
-  // 4. WiFi & MQTT
   WiFi.begin(ssid, pass);
   client.begin(mqtt_broker, MQTT_PORT, net);
   client.onMessage(messageReceived);
@@ -133,7 +132,6 @@ void setup() {
 void loop() {
   client.loop();
   
-  // Reconnect MQTT ถ้าหลุด (แบบไม่ดึงจังหวะ loop)
   if (WiFi.status() == WL_CONNECTED && !client.connected()) {
     static unsigned long lastRetry = 0;
     if (millis() - lastRetry > 5000) {
@@ -142,30 +140,16 @@ void loop() {
     }
   }
 
-  // อ่านค่า LDR
   ldrValue = analogRead(LDR_PIN);
 
-  // ตรรกะปุ่มกด (สลับโหมด)
-  static int lastBtn = HIGH;
-  int currBtn = digitalRead(BUTTON_PIN);
-  if (lastBtn == HIGH && currBtn == LOW) {
-    isAutoMode = !isAutoMode;
-    delay(50); // Simple debounce
-  }
-  lastBtn = currBtn;
-
-  // ควบคุมมอเตอร์
+  // ตรรกะควบคุมมอเตอร์ (อิงตามโหมดที่ถูกเปลี่ยนจาก Interrupt)
   if (isAutoMode) {
     if (ldrValue > 700) rotateCW();
     else if (ldrValue > 300) rotateCCW();
     else stopMotor();
   } else {
-    // ใน Manual Mode ใช้คำสั่งจาก MQTT motorState
     if (!motorState) stopMotor(); 
-    else {
-       // ถ้า Manual ON ให้หมุน CW เป็นค่าเริ่มต้น
-       if (!ledcw && !ledccw) rotateCW(); 
-    }
+    else if (!ledcw && !ledccw) rotateCW(); // Manual Default ให้หมุน CW
   }
 
   // ส่งข้อมูล MQTT ทุก 2 วินาที
@@ -175,12 +159,12 @@ void loop() {
     lastPublishTime = millis();
   }
 
-  // อัปเดต LCD ทุก 500ms
+  // อัปเดต LCD
   if (millis() - lastLCDUpdateTime > 500) {
     lcd.setCursor(0, 0);
     lcd.print("MOD:"); lcd.print(isAutoMode ? "AUTO " : "MANU ");
     lcd.print("LDR:"); lcd.print(ldrValue);
-    lcd.print("    "); // Clear ท้ายบรรทัด
+    lcd.print("    ");
 
     lcd.setCursor(0, 1);
     lcd.print("MOT:");
